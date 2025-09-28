@@ -1,11 +1,24 @@
+// src/app/api/distance/route.ts
 import { NextResponse } from 'next/server';
 
-const MAPBOX_TOKEN = process.env.MAPBOX_ACCESS_TOKEN!;
+const MAPBOX_TOKEN =
+  process.env.MAPBOX_SECRET_TOKEN ||
+  process.env.MAPBOX_ACCESS_TOKEN ||
+  process.env.NEXT_PUBLIC_MAPBOX_TOKEN ||
+  '';
 
-// POST /api/distance
+export async function GET() {
+  // ping di test per evitare 404 quando apri l’URL nel browser
+  return NextResponse.json({ ok: true });
+}
+
 // body: { from: {lat:number, lon:number}, to: {lat:number, lon:number} }
 export async function POST(req: Request) {
   try {
+    if (!MAPBOX_TOKEN) {
+      return NextResponse.json({ error: 'Mapbox token missing' }, { status: 500 });
+    }
+
     const { from, to } = await req.json();
     if (!from || !to) {
       return NextResponse.json({ error: 'Missing from/to' }, { status: 400 });
@@ -25,18 +38,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Mapbox error: ${txt}` }, { status: 500 });
     }
     const data = await r.json();
-
     const route = data?.routes?.[0];
     if (!route) {
       return NextResponse.json({ error: 'No route found' }, { status: 404 });
     }
 
-    // Mapbox dà "distance" in metri.
     const km = route.distance / 1000;
-    const durationMin = Math.round((route.duration || 0) / 60);
-
+    const durationMin = Math.round(route.duration / 60);
     return NextResponse.json({ km, durationMin });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
