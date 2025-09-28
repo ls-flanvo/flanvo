@@ -1,9 +1,8 @@
 import Stripe from 'stripe';
 import { NextResponse } from 'next/server';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-  apiVersion: '2024-06-20',
-});
+// ✅ Usa la versione di default di Stripe per evitare l'errore TS
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
 export async function POST(req: Request) {
   try {
@@ -16,7 +15,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ Creiamo una Checkout Session
+    // ✅ Creiamo la Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -37,10 +36,15 @@ export async function POST(req: Request) {
       metadata: { groupId },
     });
 
-    // ✅ Risposta col sessionId
+    // ✅ Risposta con l’ID della sessione
     return NextResponse.json({ sessionId: session.id });
-  } catch (err: any) {
-    console.error(err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    // Cast sicuro per l'errore
+    const error = err as { message?: string };
+    console.error('Checkout error:', error);
+    return NextResponse.json(
+      { error: error.message || 'Unexpected error' },
+      { status: 500 }
+    );
   }
 }
