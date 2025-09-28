@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start",
-    "lint": "eslint"
-  },
+  "dev": "next dev --turbo",
+  "build": "NEXT_DISABLE_ESLINT_PLUGIN=true next build --turbo",
+  "start": "next start",
+  "lint": "eslint"
+}
   "dependencies": {
     "@stripe/stripe-js": "^7.9.0",
     "@supabase/auth-ui-react": "^0.4.7",
