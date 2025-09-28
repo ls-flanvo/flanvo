@@ -2,12 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import { loadStripe } from '@stripe/stripe-js';
 
-// Stripe (publishable key lato client)
-const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!);
-
-type Session = { user: { id: string } } | null;
+// ----- Tipi -----
+type Session = { user: { id: string; email?: string } } | null;
 
 type RequestRow = {
   id: string;
@@ -20,9 +17,12 @@ type RequestRow = {
   created_at: string;
 };
 
-type Airport = { lat: number; lon: number; name: string; place_name: string };
+type AirportPoint = { lat: number; lon: number; name?: string; place_name?: string };
 
-function haversineKm(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
+type FlightRow = { id: string; airport_code: string | null };
+
+// ----- Utils -----
+const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
   const R = 6371;
   const dLat = ((b.lat - a.lat) * Math.PI) / 180;
   const dLon = ((b.lon - a.lon) * Math.PI) / 180;
@@ -32,21 +32,42 @@ function haversineKm(a: { lat: number; lon: number }, b: { lat: number; lon: num
       Math.cos((b.lat * Math.PI) / 180) *
       Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(s1));
+};
+
+// Chiama la nostra API che geocodifica l’aeroporto lato server (usa SK di Mapbox sul server)
+async function geocodeAirport(iata: string): Promise<AirportPoint | null> {
+  const r = await fetch(`/api/geocode-airport?code=${encodeURIComponent(iata)}`, { cache: 'no-store' });
+  if (!r.ok) return null;
+  return r.json();
+}
+
+// Chiama la nostra API che usa Mapbox Directions lato server
+async function drivingDistanceKm(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
+  const r = await fetch('/api/distance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || 'Distance API error');
+  // data: { km, durationMin }
+  return data.km as number;
 }
 
 export default function MatchesPage() {
   const [session, setSession] = useState<Session>(null);
+
   const [loading, setLoading] = useState(true);
   const [mine, setMine] = useState<RequestRow | null>(null);
   const [sameFlight, setSameFlight] = useState<RequestRow[]>([]);
+  const [airportCode, setAirportCode] = useState<string | null>(null);
+  const [airportPoint, setAirportPoint] = useState<AirportPoint | null>(null);
+
+  const [estPerPax, setEstPerPax] = useState<number | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [forming, setForming] = useState(false);
 
-  // stime costi/percorsi
-  const [airport, setAirport] = useState<Airport | null>(null);
-  const [tripKm, setTripKm] = useState<number | null>(null);
-  const [tripMin, setTripMin] = useState<number | null>(null);
-
+  // ---- carico session + dati base
   useEffect(() => {
     const init = async () => {
       const { data } = await supabase.auth.getSession();
@@ -58,7 +79,7 @@ export default function MatchesPage() {
         return;
       }
 
-      // mia ultima richiesta
+      // 1) mia ultima richiesta
       const { data: reqs, error } = await supabase
         .from('requests')
         .select(
@@ -73,19 +94,29 @@ export default function MatchesPage() {
         setLoading(false);
         return;
       }
-      const myReq = (reqs && (reqs as any[])[0]) || null;
-      setMine(myReq as any);
 
-      // altri dello stesso volo
+      const myReq = (reqs && (reqs as any[])[0]) as RequestRow | null;
+      setMine(myReq);
+
+      // 2) altri passeggeri stesso volo (RPC)
       if (myReq?.flight_id) {
         const { data: peers, error: e2 } = await supabase.rpc(
           'get_same_flight_requests',
           { my_user: s.user.id }
         );
         if (e2) setMsg('Errore lettura passeggeri: ' + e2.message);
-        setSameFlight(
-          ((peers || []) as any[]).filter((r) => r.user_id !== s.user.id) as any
-        );
+        setSameFlight(((peers || []) as any[]).filter((r) => r.user_id !== s.user.id) as any);
+      }
+
+      // 3) leggo codice IATA di arrivo dal volo
+      if (myReq?.flight_id) {
+        const { data: fl, error: fe } = await supabase
+          .from('flights')
+          .select('id, airport_code')
+          .eq('id', myReq.flight_id)
+          .maybeSingle();
+        if (fe) setMsg('Errore lettura volo: ' + fe.message);
+        setAirportCode((fl as FlightRow | null)?.airport_code ?? null);
       }
 
       setLoading(false);
@@ -93,13 +124,23 @@ export default function MatchesPage() {
 
     init();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) =>
-      setSession(s as any)
-    );
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s as any));
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // top 3 più vicini alla mia destinazione
+  // ---- recupero coordinate aeroporto (server) non appena ho il codice IATA
+  useEffect(() => {
+    if (!airportCode) return;
+    (async () => {
+      const ap = await geocodeAirport(airportCode);
+      if (!ap) {
+        setMsg('Geocoding aeroporto fallito (userò fallback).');
+      }
+      setAirportPoint(ap);
+    })();
+  }, [airportCode]);
+
+  // ---- suggerimenti: ordino per distanza tra destinazioni
   const suggestions = useMemo(() => {
     if (!mine) return [];
     const origin = { lat: mine.dest_lat, lon: mine.dest_lon };
@@ -113,69 +154,47 @@ export default function MatchesPage() {
       .map((x) => x.r);
   }, [mine, sameFlight]);
 
-  // geocoda aeroporto di arrivo del volo e calcola distanza reale con Mapbox
+  // ---- stima costi: distanza aeroporto -> ogni destinazione (server) + tariffa demo
   useEffect(() => {
-    (async () => {
+    const run = async () => {
       try {
+        setEstPerPax(null);
         if (!mine) return;
 
-        // recupera codice IATA di arrivo dal volo
-        const { data: flight } = await supabase
-          .from('flights')
-          .select('airport_code')
-          .eq('id', mine.flight_id)
-          .single();
+        const ap = airportPoint || null;
+        if (!ap) return;
 
-        const code = flight?.airport_code as string | undefined;
-        if (!code) return;
+        // destinazioni (mia + suggerimenti)
+        const everyone = [mine, ...suggestions];
 
-        // 1) geocode airport (server side, usa sk)
-        const aRes = await fetch(`/api/geocode-airport?code=${encodeURIComponent(code)}`);
-        const a = await aRes.json();
-        if (!aRes.ok || a.error) {
-          setMsg(`Geocoding aeroporto fallito (userò fallback).`);
-        } else {
-          setAirport(a as Airport);
+        // distanza totale: sommo le tratte aeroporto -> singola destinazione
+        // (semplificazione per stima rapida)
+        let totalKm = 0;
+        for (const r of everyone) {
+          const km = await drivingDistanceKm({ lat: ap.lat, lon: ap.lon }, { lat: r.dest_lat, lon: r.dest_lon });
+          totalKm += km;
         }
 
-        // 2) distanza reale Aeroporto -> mia destinazione
-        const from = { lat: (a.lat ?? 0), lon: (a.lon ?? 0) };
-        const to = { lat: mine.dest_lat, lon: mine.dest_lon };
+        // tariffa demo: €1.2 / km con minimo €10
+        const totalEuro = Math.max(10, totalKm * 1.2);
+        const totalPax = everyone.reduce((s, r) => s + (r.pax || 1), 0);
+        const share = totalEuro / Math.max(1, totalPax);
 
-        const dRes = await fetch('/api/distance', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from, to }),
-        });
-        const dData = await dRes.json();
-        if (dRes.ok) {
-          setTripKm(dData.km);
-          setTripMin(dData.minutes);
-        } else {
-          setTripKm(null);
-          setTripMin(null);
-        }
-      } catch {
-        // ignora: mostriamo solo stima se disponibile
+        setEstPerPax(Math.round(share * 100) / 100);
+      } catch (e: any) {
+        setMsg('Stima costi fallita: ' + e.message);
       }
-    })();
-  }, [mine]);
+    };
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [airportPoint, mine, suggestions.length]);
 
-  // costo fittizio per demo
-  const estimatedShare = useMemo(() => {
-    const people = (suggestions.length + 1) || 1;
-    const km = tripKm ?? 10;
-    const total = Math.max(5, Math.round(km * 1.0)); // €1/km min €5
-    return Math.round((total / people) * 100) / 100;
-  }, [suggestions.length, tripKm]);
-
-  // crea gruppo
+  // ---- crea gruppo
   const formGroup = async () => {
     if (!mine) return;
     try {
       setForming(true);
       setMsg(null);
-
       const { data: g, error: gErr } = await supabase
         .from('groups')
         .insert({ flight_id: mine.flight_id, status: 'forming' })
@@ -189,10 +208,11 @@ export default function MatchesPage() {
         distance_km: null,
         price_share_cents: null,
       }));
+
       const { error: mErr } = await supabase.from('group_members').insert(members);
       if (mErr) throw mErr;
 
-      setMsg('✅ Gruppo creato! (controlla tabelle groups / group_members)');
+      setMsg('✅ Gruppo creato! (vedi tabelle groups / group_members)');
     } catch (e: any) {
       setMsg('Errore creazione gruppo: ' + e.message);
     } finally {
@@ -200,35 +220,7 @@ export default function MatchesPage() {
     }
   };
 
-  // pagamento demo: crea Checkout Session server-side e redirect
-  const handlePayment = async () => {
-    if (!mine) return;
-    try {
-      setMsg(null);
-      const amountCents = Math.round(estimatedShare * 100);
-
-      const res = await fetch('/api/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          groupId: mine.flight_id,
-          amountCents,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || 'Checkout error');
-
-      const stripe = await stripePromise;
-      if (!stripe) throw new Error('Stripe non caricato');
-
-      const { error } = await stripe.redirectToCheckout({ sessionId: data.sessionId });
-      if (error) throw error;
-    } catch (err: any) {
-      setMsg('Errore pagamento: ' + err.message);
-    }
-  };
-
-  // UI
+  // ---- UI
   if (loading) return <main className="p-6 text-zinc-400">Carico…</main>;
 
   if (!session) {
@@ -260,31 +252,32 @@ export default function MatchesPage() {
       <div className="max-w-3xl mx-auto space-y-6">
         <header className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">Matches — stesso volo</h1>
-          <a href="/app" className="rounded-xl px-3 py-2 bg-zinc-800 hover:bg-zinc-700">
+          <a
+            href="/app"
+            className="rounded-xl px-3 py-2 bg-zinc-800 hover:bg-zinc-700"
+          >
             Nuova richiesta
           </a>
         </header>
 
+        {/* La tua richiesta */}
         <section className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-2xl p-5">
           <h2 className="font-medium mb-3">La tua richiesta</h2>
           <div className="text-sm text-zinc-300">
             <div>ID: {mine.id}</div>
-            <div>Dest: {mine.dest_address ?? `${mine.dest_lat}, ${mine.dest_lon}`}</div>
+            <div>
+              Dest:{' '}
+              {mine.dest_address ?? `${mine.dest_lat.toFixed(5)}, ${mine.dest_lon.toFixed(5)}`}
+            </div>
             <div>Creato: {new Date(mine.created_at).toLocaleString()}</div>
-            {airport && (
-              <div className="mt-2 text-zinc-400">
-                Aeroporto: {airport.place_name}
-              </div>
-            )}
-            {tripKm != null && (
-              <div className="mt-1 text-zinc-400">
-                Distanza stimata: ~{tripKm.toFixed(1)} km
-                {tripMin != null ? ` · ${tripMin} min` : ''}
-              </div>
-            )}
+            <div className="mt-1 text-zinc-400">
+              Aeroporto arrivo: {airportCode ?? '—'}{' '}
+              {airportPoint?.place_name ? `→ ${airportPoint.place_name}` : ''}
+            </div>
           </div>
         </section>
 
+        {/* Suggerimenti compagni */}
         <section className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-2xl p-5 space-y-3">
           <h2 className="font-medium">Suggerimenti di compagni (max 3)</h2>
           {suggestions.length === 0 ? (
@@ -299,8 +292,7 @@ export default function MatchesPage() {
                   className="flex items-center justify-between bg-zinc-950 rounded-xl px-3 py-2"
                 >
                   <span>
-                    {s.dest_address ??
-                      `${s.dest_lat.toFixed(4)}, ${s.dest_lon.toFixed(4)}`}
+                    {s.dest_address ?? `${s.dest_lat.toFixed(4)}, ${s.dest_lon.toFixed(4)}`}
                   </span>
                   <span className="text-zinc-400">pax {s.pax}</span>
                 </li>
@@ -309,22 +301,17 @@ export default function MatchesPage() {
           )}
 
           <div className="text-sm text-zinc-300 bg-zinc-950 rounded-xl px-3 py-2">
-            Stima quota per passeggero: <strong>€{estimatedShare.toFixed(2)}</strong> (demo)
+            {estPerPax != null
+              ? <>Stima quota per passeggero: <b>€{estPerPax.toFixed(2)}</b> (demo)</>
+              : 'Calcolo stima in corso…'}
           </div>
 
           <button
             disabled={forming || !mine}
             onClick={formGroup}
-            className="w-full rounded-2xl bg-yellow-300 text-black font-medium py-3 disabled:opacity-60"
+            className="w-full rounded-2xl bg-white text-black font-medium py-3 disabled:opacity-60"
           >
             {forming ? 'Creo gruppo…' : 'Forma gruppo'}
-          </button>
-
-          <button
-            onClick={handlePayment}
-            className="w-full rounded-2xl bg-fuchsia-600 text-white font-medium py-3"
-          >
-            Procedi al pagamento (demo)
           </button>
 
           {msg && <p className="text-sm text-zinc-300 mt-2">{msg}</p>}
