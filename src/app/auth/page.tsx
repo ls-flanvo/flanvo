@@ -35,6 +35,7 @@ export default function AuthPage() {
                       inputText: 'white',
                     },
                     radii: { borderRadius: '12px' },
+                    inputBorderRadius: '12px',
                   },
                 },
                 className: {
