@@ -1,6 +1,7 @@
 'use client';
 
-import { Auth, ThemeSupa } from '@supabase/auth-ui-react';
+import { Auth } from '@supabase/auth-ui-react';
+import { ThemeSupa } from '@supabase/auth-ui-shared'; // ✅ import corretto
 import { supabase } from '@/lib/supabaseClient';
 
 export default function AuthPage() {
@@ -27,7 +28,6 @@ export default function AuthPage() {
               },
             },
           }}
-          // Nessun providers: resta solo email/password/magic link (in base a Supabase)
           localization={{ variables: { sign_in: { email_label: 'Email' } } }}
           redirectTo="/app"
         />
@@ -35,4 +35,5 @@ export default function AuthPage() {
     </main>
   );
 }
+
 
