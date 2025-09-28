@@ -34,8 +34,9 @@ export default function AuthPage() {
                       brandAccent: '#7AF0F5',
                       inputText: 'white',
                     },
-                    radii: { borderRadius: '12px' },
-                    inputBorderRadius: '12px',
+                    radii: {
+                      buttonBorderRadius: '12px' ,
+                      inputBorderRadius: '12px',
                   },
                 },
                 className: {
