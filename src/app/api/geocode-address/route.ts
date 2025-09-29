@@ -10,9 +10,10 @@ export async function GET(req: Request) {
 
   const { searchParams } = new URL(req.url);
   const q = searchParams.get('q');
+
   if (!q) {
     return Response.json(
-      { error: 'Missing q', hint: 'Usa ?q=Roma, IT oppure ?q=Fiumicino Aeroporto' },
+      { error: 'Missing q', hint: 'Usa ?q=Roma, IT' },
       { status: 400 }
     );
   }
@@ -22,9 +23,8 @@ export async function GET(req: Request) {
   );
   url.searchParams.set('access_token', MAPBOX_TOKEN);
   url.searchParams.set('language', 'it');
-  // opzionali:
-  // url.searchParams.set('limit', '5');
-  // url.searchParams.set('types', 'address,poi,place,locality,region,country');
+  // url.searchParams.set('limit', '5'); // opzionale
+  // url.searchParams.set('types', 'address,place,poi'); // opzionale
 
   const res = await fetch(url.toString(), {
     method: 'GET',
