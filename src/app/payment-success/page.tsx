@@ -92,27 +92,41 @@ function PaymentSuccessInner() {
           if (updErr) throw updErr;
         }
 
-        // 4) Carica elenco membri del gruppo con join sull'email
+        // 4) Carica elenco membri tramite la relazione group_members -> requests -> users
         if (gId) {
-          const { data: mem, error } = await supabase
+           const { data: mem, error } = await supabase
             .from('group_members')
-            .select('request_id, distance_km, price_share_cents, users(email)')
-            .eq('group_id', gId);
+            .select(`
+               request_id,
+               distance_km,
+               price_share_cents,
+               requests (
+                 user_id,
+                 users (
+                    email
+        )
+      )
+    `)
+    .eq('group_id', gId);
 
-          if (error) throw new Error(error.message);
+  if (error) throw new Error(error.message);
 
-          // mem.users può arrivare come array -> flatten al primo elemento
-          const mapped: GroupMember[] = (mem || []).map((m: any) => ({
-            request_id: m.request_id,
-            distance_km: m.distance_km,
-            price_share_cents: m.price_share_cents,
-            user_email: Array.isArray(m.users)
-              ? m.users[0]?.email ?? null
-              : m.users?.email ?? null,
-          }));
+  // mappo in struttura piatta { user_email, ... }
+  const mapped: GroupMember[] = (mem || []).map((m: any) => ({
+    request_id: m.request_id,
+    distance_km: m.distance_km,
+    price_share_cents: m.price_share_cents,
+    user_email:
+      // se Supabase restituisce come oggetto
+      m.requests?.users?.email ??
+      // oppure come array (alcune versioni restituiscono array)
+      (Array.isArray(m.requests?.users) ? m.requests.users[0]?.email : null) ??
+      null,
+  }));
 
-          setMembers(mapped);
-        }
+  setMembers(mapped);
+}
+
 
         setMsg('Pagamento registrato con successo ✅');
       } catch (e: any) {
