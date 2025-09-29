@@ -23,8 +23,8 @@ export async function GET(req: Request) {
   );
   url.searchParams.set('access_token', MAPBOX_TOKEN);
   url.searchParams.set('language', 'it');
-  // url.searchParams.set('limit', '5'); // opzionale
-  // url.searchParams.set('types', 'address,place,poi'); // opzionale
+  // url.searchParams.set('limit', '5');
+  // url.searchParams.set('types', 'address,place,poi');
 
   const res = await fetch(url.toString(), {
     method: 'GET',
