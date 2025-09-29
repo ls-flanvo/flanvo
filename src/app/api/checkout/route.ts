@@ -31,8 +31,8 @@ export async function POST(req: Request) {
           quantity: 1,
         },
       ],
-      success_url: `${process.env.NEXT_PUBLIC_BASE_URL}/app/matches?success=1`,
-      cancel_url: `${process.env.NEXT_PUBLIC_BASE_URL}/app/matches?canceled=1`,
+      success_url: `${process.env.NEXT_PUBLIC_BASE_URL}/matches?success=1`,
+      cancel_url: `${process.env.NEXT_PUBLIC_BASE_URL}/matches?canceled=1`,
       metadata: { groupId },
     });
 
