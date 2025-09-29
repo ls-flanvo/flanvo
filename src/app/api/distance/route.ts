@@ -1,11 +1,25 @@
-// src/app/api/distance/route.ts
 import { NextResponse } from 'next/server';
 
-const MAPBOX_TOKEN =
-  process.env.MAPBOX_SECRET_TOKEN ||
-  process.env.MAPBOX_ACCESS_TOKEN ||
-  process.env.NEXT_PUBLIC_MAPBOX_TOKEN ||
-  '';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+const MAPBOX_TOKEN = process.env.MAPBOX_SECRET_TOKEN;
+
+if (!MAPBOX_TOKEN) {
+  throw new Error('Missing MAPBOX token');
+}
+
+  console.log(
+  '[MAPBOX] token in uso:',
+  MAPBOX_TOKEN?.slice(0, 3),   // pk. o sk.
+  '…',
+  MAPBOX_TOKEN?.slice(-6),     // ultime 6 cifre
+  'len=', MAPBOX_TOKEN?.length
+);
+
+if (!MAPBOX_TOKEN) {
+  return NextResponse.json({ error: 'Missing MAPBOX token' }, { status: 500 });
+}
 
 export async function GET() {
   // ping di test per evitare 404 quando apri l’URL nel browser
