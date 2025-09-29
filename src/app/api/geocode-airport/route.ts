@@ -1,77 +1,51 @@
-// src/app/api/geocode-airport/route.ts
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: Request) {
-  const MAPBOX_TOKEN = process.env.MAPBOX_SECRET_TOKEN;
-  if (!MAPBOX_TOKEN) {
-    return Response.json({ error: 'Missing MAPBOX_SECRET_TOKEN' }, { status: 500 });
-  }
+const UA = 'Flanvo/1.0 (contact: support@flanvo.app)';
 
-  const { searchParams } = new URL(req.url);
-  const q = searchParams.get('q');
+async function searchNominatim(q: string) {
+  const url = new URL('https://nominatim.openstreetmap.org/search');
+  url.searchParams.set('format', 'jsonv2');
+  url.searchParams.set('q', q);
+  url.searchParams.set('addressdetails', '1');
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('dedupe', '1');
 
-  if (!q) {
-    return Response.json(
-      { error: 'Missing q', hint: 'Usa ?q=FCO o ?q=Fiumicino Aeroporto' },
-      { status: 400 }
-    );
-  }
-
-  // Tenta prima con ricerca normale
-  let url = new URL(
-    `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json`
-  );
-  url.searchParams.set('access_token', MAPBOX_TOKEN);
-  url.searchParams.set('language', 'it');
-  url.searchParams.set('types', 'poi,place,airport'); // cerca luoghi e aeroporti
-
-  let res = await fetch(url.toString(), {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
+  const res = await fetch(url.toString(), {
+    headers: { 'Accept': 'application/json', 'User-Agent': UA },
     cache: 'no-store',
   });
+  if (!res.ok) throw new Error(`Nominatim ${res.status} ${await res.text().catch(()=>res.statusText)}`);
+  return res.json();
+}
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    return Response.json(
-      { error: `Mapbox ${res.status}`, details: text || res.statusText },
-      { status: res.status }
-    );
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get('q');
+  if (!q) {
+    return Response.json({ error: 'Missing q', hint: 'Usa ?q=FCO o ?q=Fiumicino' }, { status: 400 });
   }
 
-  let data = await res.json().catch(() => null);
+  // 1° tentativo: query originale
+  let list: any[] = [];
+  try { list = await searchNominatim(q); } catch (_) {}
 
-  // Se non trova nulla, usa un fallback specifico
-  if (!data || !Array.isArray(data.features) || data.features.length === 0) {
-    const fallback = `Aeroporto ${q}`;
-    url = new URL(
-      `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(fallback)}.json`
-    );
-    url.searchParams.set('access_token', MAPBOX_TOKEN);
-    url.searchParams.set('language', 'it');
-    url.searchParams.set('types', 'poi,place,airport');
-
-    res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      return Response.json(
-        { error: `Fallback Mapbox ${res.status}`, details: text || res.statusText },
-        { status: res.status }
-      );
-    }
-
-    data = await res.json().catch(() => null);
+  // Fallback mirato: aggiungi "airport"
+  if (!Array.isArray(list) || list.length === 0) {
+    try { list = await searchNominatim(`${q} airport`); } catch (_) {}
   }
 
-  if (!data) {
-    return Response.json({ error: 'Invalid Mapbox response' }, { status: 502 });
-  }
+  if (!Array.isArray(list)) return Response.json({ error: 'Invalid Nominatim response' }, { status: 502 });
 
-  return Response.json(data);
+  const features = list.map((it: any) => ({
+    type: 'Feature',
+    id: it.place_id?.toString(),
+    place_name: it.display_name,
+    center: [Number(it.lon), Number(it.lat)],
+    geometry: { type: 'Point', coordinates: [Number(it.lon), Number(it.lat)] },
+    address: it.address || null,
+    source: 'nominatim',
+  }));
+
+  return Response.json({ type: 'FeatureCollection', features });
 }
