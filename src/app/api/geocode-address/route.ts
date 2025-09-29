@@ -1,63 +1,49 @@
-import { NextResponse } from 'next/server';
-
+// src/app/api/geocode-address/route.ts
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const MAPBOX_TOKEN = process.env.MAPBOX_SECRET_TOKEN;
-
-if (!MAPBOX_TOKEN) {
-  throw new Error('Missing MAPBOX token');
-}
-
-  console.log(
-  '[MAPBOX] token in uso:',
-  MAPBOX_TOKEN?.slice(0, 3),   // pk. o sk.
-  '…',
-  MAPBOX_TOKEN?.slice(-6),     // ultime 6 cifre
-  'len=', MAPBOX_TOKEN?.length
-);
-
-if (!MAPBOX_TOKEN) {
-  return NextResponse.json({ error: 'Missing MAPBOX token' }, { status: 500 });
-}
-
 export async function GET(req: Request) {
-  try {
-    if (!MAPBOX_TOKEN) {
-      return NextResponse.json({ error: 'Mapbox token missing' }, { status: 500 });
-    }
-
-    const { searchParams } = new URL(req.url);
-    const q = searchParams.get('q');
-    if (!q) {
-      return NextResponse.json({ error: 'Missing address' }, { status: 400 });
-    }
-
-    const url = new URL(
-      `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json`
-    );
-    url.searchParams.set('access_token', MAPBOX_TOKEN);
-    url.searchParams.set('limit', '1');
-    url.searchParams.set('language', 'it');
-
-    const r = await fetch(url.toString(), { cache: 'no-store' });
-    const data = await r.json();
-
-    if (!r.ok) {
-      return NextResponse.json(
-        { error: `Mapbox error: ${JSON.stringify(data)}` },
-        { status: 500 }
-      );
-    }
-
-    const f = data?.features?.[0];
-    if (!f?.center) {
-      return NextResponse.json({ error: 'Address not found' }, { status: 404 });
-    }
-
-    const [lon, lat] = f.center;
-    return NextResponse.json({ lat, lon, place_name: f.place_name as string });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+  const MAPBOX_TOKEN = process.env.MAPBOX_SECRET_TOKEN;
+  if (!MAPBOX_TOKEN) {
+    return Response.json({ error: 'Missing MAPBOX_SECRET_TOKEN' }, { status: 500 });
   }
+
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get('q');
+  if (!q) {
+    return Response.json(
+      { error: 'Missing q', hint: 'Usa ?q=Roma, IT oppure ?q=Fiumicino Aeroporto' },
+      { status: 400 }
+    );
+  }
+
+  const url = new URL(
+    `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json`
+  );
+  url.searchParams.set('access_token', MAPBOX_TOKEN);
+  url.searchParams.set('language', 'it');
+  // opzionali:
+  // url.searchParams.set('limit', '5');
+  // url.searchParams.set('types', 'address,poi,place,locality,region,country');
+
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    return Response.json(
+      { error: `Mapbox ${res.status}`, details: text || res.statusText },
+      { status: res.status }
+    );
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!data) {
+    return Response.json({ error: 'Invalid Mapbox response' }, { status: 502 });
+  }
+
+  return Response.json(data);
 }
