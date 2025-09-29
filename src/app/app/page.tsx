@@ -3,13 +3,23 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
-// Helper: chiama la nostra API server-side (usa lo SK sul server)
+// Helper: chiama la nostra API server-side (Nominatim) e adatta il formato
 async function geocodeAddress(address: string) {
   const res = await fetch(`/api/geocode-address?q=${encodeURIComponent(address)}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Geocoding failed');
-  return data as { lat: number; lon: number; place_name: string };
+
+  const f = Array.isArray(data?.features) ? data.features[0] : null;
+  if (!f) throw new Error('Nessun risultato per questo indirizzo');
+
+  const [lon, lat] = f.center || [];
+  if (typeof lat !== 'number' || typeof lon !== 'number') {
+    throw new Error('Coordinate non valide');
+  }
+
+  return { lat, lon, place_name: f.place_name || address };
 }
+
 
 type Session = { user: { id: string; email?: string } } | null;
 
