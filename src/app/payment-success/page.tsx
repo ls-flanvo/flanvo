@@ -1,9 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 
+export const dynamic = 'force-dynamic'; // evita prerender & CSR bailout
+
+// Tipo pulito per i membri (email flattenata)
 type GroupMember = {
   request_id: string;
   distance_km: number | null;
@@ -11,7 +14,16 @@ type GroupMember = {
   user_email: string | null;
 };
 
+// Wrapper che fornisce la Suspense boundary
 export default function PaymentSuccessPage() {
+  return (
+    <Suspense fallback={<main className="p-6 text-zinc-300">Caricamento…</main>}>
+      <PaymentSuccessInner />
+    </Suspense>
+  );
+}
+
+function PaymentSuccessInner() {
   const params = useSearchParams();
 
   const [loading, setLoading] = useState(true);
@@ -33,7 +45,7 @@ export default function PaymentSuccessPage() {
           return;
         }
 
-        // 1) Verifica la sessione di pagamento
+        // 1) Verifica sessione Stripe (nostra API)
         const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Errore verifica pagamento');
@@ -49,7 +61,7 @@ export default function PaymentSuccessPage() {
         const gId = data.metadata?.groupId || null;
         setGroupId(gId);
 
-        // 2) Trova la mia richiesta
+        // 2) Trova la mia ultima request
         const { data: auth } = await supabase.auth.getSession();
         const userId = auth.session?.user?.id;
         if (!userId) throw new Error('Non sei loggato.');
@@ -63,15 +75,16 @@ export default function PaymentSuccessPage() {
 
         if (reqErr) throw reqErr;
         const myRequestId = reqs?.[0]?.id as string | undefined;
-        if (!myRequestId) throw new Error('Nessuna richiesta trovata.');
+        if (!myRequestId) throw new Error('Nessuna richiesta trovata per questo utente.');
 
-        // 3) Aggiorna la mia riga in group_members
+        // 3) Aggiorna la mia riga in group_members (no webhook)
         if (gId && myRequestId) {
           const { error: updErr } = await supabase
             .from('group_members')
             .update({
               price_share_cents: Math.round(data.amount_total ?? 0),
-              status: 'paid', // se hai questa colonna
+              // se NON hai la colonna "status", commenta la riga sotto
+              status: 'paid',
             })
             .eq('group_id', gId)
             .eq('request_id', myRequestId);
@@ -79,7 +92,7 @@ export default function PaymentSuccessPage() {
           if (updErr) throw updErr;
         }
 
-        // 4) Carica elenco membri del gruppo
+        // 4) Carica elenco membri del gruppo con join sull'email
         if (gId) {
           const { data: mem, error } = await supabase
             .from('group_members')
@@ -88,7 +101,7 @@ export default function PaymentSuccessPage() {
 
           if (error) throw new Error(error.message);
 
-          // ✅ Mapping corretto: estrai email
+          // mem.users può arrivare come array -> flatten al primo elemento
           const mapped: GroupMember[] = (mem || []).map((m: any) => ({
             request_id: m.request_id,
             distance_km: m.distance_km,
@@ -98,7 +111,7 @@ export default function PaymentSuccessPage() {
               : m.users?.email ?? null,
           }));
 
-          setMembers(mapped); // <-- qui ora va bene
+          setMembers(mapped);
         }
 
         setMsg('Pagamento registrato con successo ✅');
@@ -108,6 +121,7 @@ export default function PaymentSuccessPage() {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params]);
 
   if (loading) return <main className="p-6 text-zinc-300">Caricamento…</main>;
