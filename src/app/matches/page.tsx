@@ -34,32 +34,36 @@ const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: num
   return 2 * R * Math.asin(Math.sqrt(s1));
 };
 
-// Chiama la nostra API che geocodifica l’aeroporto lato server e normalizza i dati
+// Geocoding aeroporto (chiama la nostra API server-side)
 async function geocodeAirport(iata: string): Promise<AirportPoint | null> {
   const r = await fetch(`/api/geocode-airport?q=${encodeURIComponent(iata)}`, { cache: 'no-store' });
   if (!r.ok) return null;
 
   const data = await r.json();
-  const f = Array.isArray(data?.features) ? data.features[0] : null;
-  if (!f) return null;
+  const feat = data?.features?.[0];
+  if (!feat) return null;
 
-  const [lon, lat] = f.center || [];
-  if (typeof lat !== 'number' || typeof lon !== 'number') return null;
-
-  return { lat, lon, name: f.place_name };
+  return {
+    lat: feat.center[1],
+    lon: feat.center[0],
+    place_name: feat.place_name,
+  };
 }
 
-
-// Chiama la nostra API che usa OSRM lato server
+// Calcolo distanza tramite la nostra API server-side (OSRM)
 async function drivingDistanceKm(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
-  const r = await fetch('/api/distance', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, to }),
+  const params = new URLSearchParams({
+    fromLat: from.lat.toString(),
+    fromLng: from.lon.toString(),
+    toLat: to.lat.toString(),
+    toLng: to.lon.toString(),
   });
+
+  const r = await fetch(`/api/distance?${params.toString()}`, { cache: 'no-store' });
   const data = await r.json();
+
   if (!r.ok) throw new Error(data.error || 'Distance API error');
-  return data.km as number;
+  return data.route.distance_km as number;
 }
 
 export default function MatchesPage() {
@@ -86,7 +90,7 @@ export default function MatchesPage() {
         return;
       }
 
-      // mia ultima richiesta
+      // 1) mia ultima richiesta
       const { data: reqs, error } = await supabase
         .from('requests')
         .select('id, user_id, flight_id, dest_lat, dest_lon, pax, dest_address, created_at')
@@ -103,7 +107,7 @@ export default function MatchesPage() {
       const myReq = (reqs && (reqs as any[])[0]) as RequestRow | null;
       setMine(myReq);
 
-      // altri passeggeri stesso volo
+      // 2) altri passeggeri stesso volo
       if (myReq?.flight_id) {
         const { data: peers, error: e2 } = await supabase.rpc('get_same_flight_requests', {
           my_user: s.user.id,
@@ -112,7 +116,7 @@ export default function MatchesPage() {
         setSameFlight(((peers || []) as any[]).filter((r) => r.user_id !== s.user.id) as any);
       }
 
-      // leggo codice IATA di arrivo
+      // 3) leggo codice IATA di arrivo
       if (myReq?.flight_id) {
         const { data: fl, error: fe } = await supabase
           .from('flights')
@@ -131,14 +135,12 @@ export default function MatchesPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // ---- recupero coordinate aeroporto (server)
+  // ---- recupero coordinate aeroporto
   useEffect(() => {
     if (!airportCode) return;
     (async () => {
       const ap = await geocodeAirport(airportCode);
-      if (!ap) {
-        setMsg('Geocoding aeroporto fallito.');
-      }
+      if (!ap) setMsg('Geocoding aeroporto fallito (userò fallback).');
       setAirportPoint(ap);
     })();
   }, [airportCode]);
@@ -163,8 +165,12 @@ export default function MatchesPage() {
 
         const everyone = [mine, ...suggestions];
         let totalKm = 0;
+
         for (const r of everyone) {
-          const km = await drivingDistanceKm({ lat: airportPoint.lat, lon: airportPoint.lon }, { lat: r.dest_lat, lon: r.dest_lon });
+          const km = await drivingDistanceKm(
+            { lat: airportPoint.lat, lon: airportPoint.lon },
+            { lat: r.dest_lat, lon: r.dest_lon }
+          );
           totalKm += km;
         }
 
