@@ -4,41 +4,84 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 
+// Tipo pulito per i membri (email flattenata)
 type GroupMember = {
   request_id: string;
   distance_km: number | null;
   price_share_cents: number | null;
-  users?: { email: string | null };
+  user_email: string | null;
 };
 
 export default function PaymentSuccessPage() {
   const params = useSearchParams();
+
   const [loading, setLoading] = useState(true);
-  const [sessionData, setSessionData] = useState<any>(null);
-  const [members, setMembers] = useState<GroupMember[]>([]);
-  const [groupId, setGroupId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    const fetchData = async () => {
-      const session_id = params.get('session_id');
-      if (!session_id) {
-        setMsg('Sessione di pagamento mancante.');
-        setLoading(false);
-        return;
-      }
+  const [amount, setAmount] = useState<number | null>(null);
+  const [currency, setCurrency] = useState<string>('EUR');
+  const [groupId, setGroupId] = useState<string | null>(null);
 
+  const [members, setMembers] = useState<GroupMember[]>([]);
+
+  useEffect(() => {
+    (async () => {
       try {
-        // 1) Verifica la sessione Stripe
-        const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(session_id)}`);
+        const sessionId = params.get('session_id');
+        if (!sessionId) {
+          setMsg('Manca session_id nella URL.');
+          setLoading(false);
+          return;
+        }
+
+        // 1) Verifica sessione Stripe (nostra API)
+        const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Errore verifica pagamento');
 
-        setSessionData(data);
-        const gId = data.metadata?.groupId || data.groupId;
-        setGroupId(gId || null);
+        if (data.payment_status !== 'paid') {
+          setMsg('Pagamento non confermato.');
+          setLoading(false);
+          return;
+        }
 
-        // 2) Recupera membri gruppo da Supabase
+        setAmount((data.amount_total ?? 0) / 100);
+        setCurrency((data.currency || 'EUR').toUpperCase());
+        const gId = data.metadata?.groupId || null;
+        setGroupId(gId);
+
+        // 2) Identifica il mio request_id
+        const { data: auth } = await supabase.auth.getSession();
+        const userId = auth.session?.user?.id;
+        if (!userId) throw new Error('Non sei loggato.');
+
+        const { data: reqs, error: reqErr } = await supabase
+          .from('requests')
+          .select('id')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (reqErr) throw reqErr;
+        const myRequestId = (reqs && reqs[0]?.id) as string | undefined;
+        if (!myRequestId) throw new Error('Nessuna richiesta trovata per questo utente.');
+
+        // 3) Aggiorna la mia riga in group_members (no webhook): segna pagato e salva importo
+        if (gId && myRequestId) {
+          const { error: updErr } = await supabase
+            .from('group_members')
+            .update({
+              price_share_cents: Math.round(data.amount_total ?? 0),
+              // Se NON hai la colonna "status", commenta la riga sotto
+              status: 'paid',
+            })
+            .eq('group_id', gId)
+            .eq('request_id', myRequestId);
+
+          if (updErr) throw updErr;
+        }
+
+        // 4) Carica elenco membri del gruppo con join sull'email
         if (gId) {
           const { data: mem, error } = await supabase
             .from('group_members')
@@ -46,16 +89,26 @@ export default function PaymentSuccessPage() {
             .eq('group_id', gId);
 
           if (error) throw new Error(error.message);
-          setMembers(mem || []);
+
+          // mem.users arriva come array -> flatten al primo elemento
+          const clean: GroupMember[] = (mem || []).map((m: any) => ({
+            request_id: m.request_id,
+            distance_km: m.distance_km,
+            price_share_cents: m.price_share_cents,
+            user_email: Array.isArray(m.users) ? (m.users[0]?.email ?? null) : (m.users?.email ?? null),
+          }));
+
+          setMembers(clean);
         }
+
+        setMsg('Pagamento registrato con successo ✅');
       } catch (e: any) {
-        setMsg(e.message);
+        setMsg(e.message || 'Errore sconosciuto');
       } finally {
         setLoading(false);
       }
-    };
-
-    fetchData();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params]);
 
   if (loading) return <main className="p-6 text-zinc-300">Caricamento…</main>;
@@ -63,30 +116,27 @@ export default function PaymentSuccessPage() {
   return (
     <main className="min-h-screen bg-black text-white p-6">
       <div className="max-w-2xl mx-auto space-y-6">
-        <h1 className="text-2xl font-bold text-green-400">Pagamento riuscito ✅</h1>
+        <h1 className="text-2xl font-bold text-green-400">Pagamento riuscito</h1>
 
-        {msg && <div className="bg-red-900/50 rounded-lg p-3">{msg}</div>}
-
-        {sessionData && (
-          <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4 space-y-2">
-            <p>
-              Hai pagato <b>€{(sessionData.amount_total / 100).toFixed(2)}</b> {sessionData.currency}.
-            </p>
-            <p>Stato sessione: {sessionData.payment_status}</p>
-            {groupId && <p>ID Gruppo: {groupId}</p>}
+        {msg && (
+          <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4">
+            {msg}
           </div>
         )}
+
+        <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4 space-y-1">
+          <p>Importo pagato: <b>{amount?.toFixed(2)} {currency}</b></p>
+          {groupId && <p>ID gruppo: {groupId}</p>}
+        </div>
 
         {members.length > 0 && (
           <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4 space-y-2">
             <h2 className="font-medium">Membri del gruppo</h2>
             <ul className="space-y-1 text-sm">
-              {members.map((m, idx) => (
-                <li key={idx} className="flex justify-between bg-zinc-950 rounded px-3 py-1">
-                  <span>{m.users?.email || m.request_id}</span>
-                  <span>
-                    {m.price_share_cents ? `€${(m.price_share_cents / 100).toFixed(2)}` : '—'}
-                  </span>
+              {members.map((m) => (
+                <li key={m.request_id} className="flex justify-between bg-zinc-950 rounded px-3 py-1">
+                  <span>{m.user_email ?? m.request_id}</span>
+                  <span>{m.price_share_cents != null ? `€${(m.price_share_cents / 100).toFixed(2)}` : '—'}</span>
                 </li>
               ))}
             </ul>
