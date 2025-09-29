@@ -2,6 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { loadStripe } from '@stripe/stripe-js';
+
+const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!);
 
 // ----- Tipi -----
 type Session = { user: { id: string; email?: string } } | null;
@@ -34,23 +37,22 @@ const haversineKm = (a: { lat: number; lon: number }, b: { lat: number; lon: num
   return 2 * R * Math.asin(Math.sqrt(s1));
 };
 
-// Geocoding aeroporto (chiama la nostra API server-side)
+// ---- Geocoding aeroporto
 async function geocodeAirport(iata: string): Promise<AirportPoint | null> {
   const r = await fetch(`/api/geocode-airport?q=${encodeURIComponent(iata)}`, { cache: 'no-store' });
   if (!r.ok) return null;
-
   const data = await r.json();
-  const feat = data?.features?.[0];
-  if (!feat) return null;
+  if (!data?.features?.length) return null;
 
+  const f = data.features[0];
   return {
-    lat: feat.center[1],
-    lon: feat.center[0],
-    place_name: feat.place_name,
+    lat: f.geometry.coordinates[1],
+    lon: f.geometry.coordinates[0],
+    place_name: f.place_name,
   };
 }
 
-// Calcolo distanza tramite la nostra API server-side (OSRM)
+// ---- Distanza (OSRM)
 async function drivingDistanceKm(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
   const params = new URLSearchParams({
     fromLat: from.lat.toString(),
@@ -61,24 +63,46 @@ async function drivingDistanceKm(from: { lat: number; lon: number }, to: { lat: 
 
   const r = await fetch(`/api/distance?${params.toString()}`, { cache: 'no-store' });
   const data = await r.json();
-
   if (!r.ok) throw new Error(data.error || 'Distance API error');
+
   return data.route.distance_km as number;
 }
 
+// ---- Pagamento
+async function payMyShare(euroPerPax: number, groupId: string) {
+  const amountCents = Math.max(50, Math.round(euroPerPax * 100)); // minimo 0.50 €
+  const res = await fetch('/api/checkout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId, amountCents }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data?.sessionId) throw new Error(data.error || 'Checkout error');
+
+  const stripe = await stripePromise;
+  await stripe!.redirectToCheckout({ sessionId: data.sessionId });
+}
+
+// =============================
+//         COMPONENTE
+// =============================
 export default function MatchesPage() {
   const [session, setSession] = useState<Session>(null);
   const [loading, setLoading] = useState(true);
+
   const [mine, setMine] = useState<RequestRow | null>(null);
   const [sameFlight, setSameFlight] = useState<RequestRow[]>([]);
   const [airportCode, setAirportCode] = useState<string | null>(null);
   const [airportPoint, setAirportPoint] = useState<AirportPoint | null>(null);
 
   const [estPerPax, setEstPerPax] = useState<number | null>(null);
+  const [groupId, setGroupId] = useState<string | null>(null);
+
   const [msg, setMsg] = useState<string | null>(null);
   const [forming, setForming] = useState(false);
 
-  // ---- carico session + dati base
+  // ---- carico sessione e dati
   useEffect(() => {
     const init = async () => {
       const { data } = await supabase.auth.getSession();
@@ -116,7 +140,7 @@ export default function MatchesPage() {
         setSameFlight(((peers || []) as any[]).filter((r) => r.user_id !== s.user.id) as any);
       }
 
-      // 3) leggo codice IATA di arrivo
+      // 3) codice IATA volo
       if (myReq?.flight_id) {
         const { data: fl, error: fe } = await supabase
           .from('flights')
@@ -135,17 +159,17 @@ export default function MatchesPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // ---- recupero coordinate aeroporto
+  // ---- geocode aeroporto
   useEffect(() => {
     if (!airportCode) return;
     (async () => {
       const ap = await geocodeAirport(airportCode);
-      if (!ap) setMsg('Geocoding aeroporto fallito (userò fallback).');
+      if (!ap) setMsg('Geocoding aeroporto fallito.');
       setAirportPoint(ap);
     })();
   }, [airportCode]);
 
-  // ---- suggerimenti: ordino per distanza
+  // ---- suggerimenti
   const suggestions = useMemo(() => {
     if (!mine) return [];
     const origin = { lat: mine.dest_lat, lon: mine.dest_lon };
@@ -165,7 +189,6 @@ export default function MatchesPage() {
 
         const everyone = [mine, ...suggestions];
         let totalKm = 0;
-
         for (const r of everyone) {
           const km = await drivingDistanceKm(
             { lat: airportPoint.lat, lon: airportPoint.lon },
@@ -198,6 +221,8 @@ export default function MatchesPage() {
         .single();
       if (gErr) throw gErr;
 
+      setGroupId((g as any).id);
+
       const members = [mine, ...suggestions].map((r) => ({
         group_id: (g as any).id,
         request_id: r.id,
@@ -216,7 +241,7 @@ export default function MatchesPage() {
     }
   };
 
-  // ---- UI
+  // ---- UI ----
   if (loading) return <main className="p-6 text-zinc-400">Carico…</main>;
 
   if (!session) {
@@ -268,11 +293,13 @@ export default function MatchesPage() {
           </div>
         </section>
 
-        {/* Suggerimenti compagni */}
+        {/* Suggerimenti */}
         <section className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-2xl p-5 space-y-3">
           <h2 className="font-medium">Suggerimenti di compagni (max 3)</h2>
           {suggestions.length === 0 ? (
-            <p className="text-zinc-400 text-sm">Nessun altro passeggero trovato su questo volo (ancora).</p>
+            <p className="text-zinc-400 text-sm">
+              Nessun altro passeggero trovato su questo volo (ancora).
+            </p>
           ) : (
             <ul className="space-y-2 text-sm">
               {suggestions.map((s) => (
@@ -284,10 +311,34 @@ export default function MatchesPage() {
             </ul>
           )}
 
+          {/* STIMA E PAGAMENTO */}
           <div className="text-sm text-zinc-300 bg-zinc-950 rounded-xl px-3 py-2">
-            {estPerPax != null ? <>Stima quota per passeggero: <b>€{estPerPax.toFixed(2)}</b> (demo)</> : 'Calcolo stima in corso…'}
+            {estPerPax != null ? (
+              <>
+                Stima quota per passeggero: <b>€{estPerPax.toFixed(2)}</b> (demo)
+                {groupId ? (
+                  <button
+                    className="ml-3 inline-flex items-center rounded-xl px-3 py-2 bg-white text-black font-medium"
+                    onClick={async () => {
+                      try {
+                        await payMyShare(estPerPax!, groupId);
+                      } catch (e: any) {
+                        setMsg('Pagamento fallito: ' + e.message);
+                      }
+                    }}
+                  >
+                    Paga la mia quota
+                  </button>
+                ) : (
+                  <span className="ml-2 text-zinc-400">(crea prima il gruppo)</span>
+                )}
+              </>
+            ) : (
+              'Calcolo stima in corso…'
+            )}
           </div>
 
+          {/* CREA GRUPPO */}
           <button
             disabled={forming || !mine}
             onClick={formGroup}
