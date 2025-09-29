@@ -3,10 +3,11 @@ export const runtime = 'nodejs';
 
 export async function GET() {
   const t = process.env.MAPBOX_SECRET_TOKEN || '';
+
   return Response.json({
-    hasMapboxSecret: Boolean(t),
-    tokenPrefix: t.slice(0, 3),   // "pk." o "sk."
-    tokenLen: t.length,
-    nodeEnv: process.env.NODE_ENV,
+    hasMapboxSecret: Boolean(t),      // true se la variabile è presente
+    tokenPrefix: t.slice(0, 3),       // mostra solo i primi caratteri (pk. o sk.)
+    tokenLen: t.length,               // lunghezza del token
+    nodeEnv: process.env.NODE_ENV,    // "production" o "development"
   });
 }
