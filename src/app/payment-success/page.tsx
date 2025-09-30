@@ -4,9 +4,8 @@ import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 
-export const dynamic = 'force-dynamic'; // evita prerender & CSR bailout
+export const dynamic = 'force-dynamic';
 
-// Tipo pulito per i membri (email flattenata)
 type GroupMember = {
   request_id: string;
   distance_km: number | null;
@@ -14,7 +13,12 @@ type GroupMember = {
   user_email: string | null;
 };
 
-// Wrapper che fornisce la Suspense boundary
+function shortGroupCode(id: string | null) {
+  if (!id) return null;
+  const raw = id.replace(/-/g, '');
+  return raw.slice(0, 8).toUpperCase();
+}
+
 export default function PaymentSuccessPage() {
   return (
     <Suspense fallback={<main className="p-6 text-zinc-300">Caricamento…</main>}>
@@ -45,11 +49,15 @@ function PaymentSuccessInner() {
           return;
         }
 
-        // 1) Verifica sessione Stripe (nostra API)
-        const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'Errore verifica pagamento');
+        const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`, {
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        });
+        const ct = r.headers.get('content-type') || '';
+        const payload = ct.includes('application/json') ? await r.json() : { error: await r.text() };
+        if (!r.ok) throw new Error((payload as any).error || 'Errore verifica pagamento');
 
+        const data = payload as any;
         if (data.payment_status !== 'paid') {
           setMsg('Pagamento non confermato.');
           setLoading(false);
@@ -61,7 +69,6 @@ function PaymentSuccessInner() {
         const gId = data.metadata?.groupId || null;
         setGroupId(gId);
 
-        // 2) Trova la mia ultima request
         const { data: auth } = await supabase.auth.getSession();
         const userId = auth.session?.user?.id;
         if (!userId) throw new Error('Non sei loggato.');
@@ -77,56 +84,49 @@ function PaymentSuccessInner() {
         const myRequestId = reqs?.[0]?.id as string | undefined;
         if (!myRequestId) throw new Error('Nessuna richiesta trovata per questo utente.');
 
-        // 3) Aggiorna la mia riga in group_members (no webhook)
         if (gId && myRequestId) {
           const { error: updErr } = await supabase
             .from('group_members')
             .update({
               price_share_cents: Math.round(data.amount_total ?? 0),
-              // se NON hai la colonna "status", commenta la riga sotto
-              status: 'paid',
+              status: 'paid', // commenta se non hai la colonna
             })
             .eq('group_id', gId)
             .eq('request_id', myRequestId);
-
           if (updErr) throw updErr;
         }
 
-        // 4) Carica elenco membri tramite la relazione group_members -> requests -> users
         if (gId) {
-           const { data: mem, error } = await supabase
+          const { data: mem, error } = await supabase
             .from('group_members')
             .select(`
-               request_id,
-               distance_km,
-               price_share_cents,
-               requests (
-                 user_id,
-                 users (
-                    email
-        )
-      )
-    `)
-    .eq('group_id', gId);
+              request_id,
+              distance_km,
+              price_share_cents,
+              requests (
+                id,
+                user_id,
+                users (
+                  email
+                )
+              )
+            `)
+            .eq('group_id', gId);
 
-  if (error) throw new Error(error.message);
+          if (error) throw new Error(error.message);
 
-  // mappo in struttura piatta { user_email, ... }
-  const mapped: GroupMember[] = (mem || []).map((m: any) => ({
-    request_id: m.request_id,
-    distance_km: m.distance_km,
-    price_share_cents: m.price_share_cents,
-    user_email:
-      // se Supabase restituisce come oggetto
-      m.requests?.users?.email ??
-      // oppure come array (alcune versioni restituiscono array)
-      (Array.isArray(m.requests?.users) ? m.requests.users[0]?.email : null) ??
-      null,
-  }));
+          const mapped: GroupMember[] = (mem || []).map((m: any) => ({
+            request_id: m.request_id,
+            distance_km: m.distance_km,
+            price_share_cents: m.price_share_cents,
+            user_email:
+              m.requests?.users?.email ??
+              (Array.isArray(m.requests?.users) ? m.requests.users[0]?.email : null) ??
+              null,
+          }));
 
-  setMembers(mapped);
-}
-
+          setMembers(mapped);
+        }
 
         setMsg('Pagamento registrato con successo ✅');
       } catch (e: any) {
@@ -153,7 +153,7 @@ function PaymentSuccessInner() {
 
         <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4 space-y-1">
           <p>Importo pagato: <b>{amount?.toFixed(2)} {currency}</b></p>
-          {groupId && <p>ID gruppo: {groupId}</p>}
+          {groupId && <p>Codice gruppo: <b>{shortGroupCode(groupId)}</b></p>}
         </div>
 
         {members.length > 0 && (
@@ -162,7 +162,7 @@ function PaymentSuccessInner() {
             <ul className="space-y-1 text-sm">
               {members.map((m) => (
                 <li key={m.request_id} className="flex justify-between bg-zinc-950 rounded px-3 py-1">
-                  <span>{m.user_email ?? m.request_id}</span>
+                  <span>{m.user_email ?? '—'}</span>
                   <span>{m.price_share_cents != null ? `€${(m.price_share_cents / 100).toFixed(2)}` : '—'}</span>
                 </li>
               ))}
@@ -171,10 +171,10 @@ function PaymentSuccessInner() {
         )}
 
         <a
-          href="/matches"
+          href="/"
           className="inline-block rounded-xl bg-white text-black px-4 py-2 font-medium"
         >
-          Torna ai Matches
+          Torna alla Home
         </a>
       </div>
     </main>
