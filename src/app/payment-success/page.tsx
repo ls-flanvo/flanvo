@@ -12,7 +12,7 @@ type GroupMember = {
   distance_km: number | null;
   price_share_cents: number | null;
   user_email: string | null;
-  user_id?: string | null; // per codice fallback
+  user_id?: string | null; // per generare codice/fare il match col logged user
 };
 
 // --------- Helpers ---------
@@ -20,9 +20,19 @@ function shortGroupCode(id?: string | null) {
   if (!id) return '—';
   return id.slice(0, 8).toUpperCase();
 }
-function labelFor(m: GroupMember) {
+function paxCodeFrom(m: Pick<GroupMember, 'user_id' | 'request_id'>) {
   const base = (m.user_id || m.request_id || '').slice(0, 8).toUpperCase();
-  return m.user_email || `PAX-${base || 'UNKNOWN'}`;
+  return `PAX-${base || 'UNKNOWN'}`;
+}
+/** Etichetta membro:
+ * - se è l'utente loggato → PAX-XXXX (tu)
+ * - altrimenti email se esiste, altrimenti PAX-XXXX
+ */
+function labelFor(m: GroupMember, meId?: string | null) {
+  if (meId && m.user_id && m.user_id === meId) {
+    return `${paxCodeFrom(m)} (tu)`;
+  }
+  return m.user_email || paxCodeFrom(m);
 }
 
 // --------- Wrapper con Suspense ---------
@@ -45,6 +55,7 @@ function PaymentSuccessInner() {
   const [groupId, setGroupId] = useState<string | null>(null);
 
   const [members, setMembers] = useState<GroupMember[]>([]);
+  const [meId, setMeId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -56,22 +67,12 @@ function PaymentSuccessInner() {
           return;
         }
 
-        // 1) Verifica sessione Stripe (API server-side)
-        const r = await fetch(
-          `/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`,
-          { cache: 'no-store' }
-        );
-
-        // Parse robusto: evita crash se arriva HTML/errore
-        let data: any = null;
-        const ct = r.headers.get('content-type') || '';
-        if (ct.includes('application/json')) {
-          data = await r.json();
-        } else {
-          const text = await r.text();
-          throw new Error(`/api/checkout/session non JSON (${r.status}): ${text.slice(0, 120)}`);
-        }
-        if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        // 1) Verifica sessione Stripe
+        const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`, {
+          cache: 'no-store',
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Errore verifica pagamento');
 
         if (data.payment_status !== 'paid') {
           setMsg('Pagamento non confermato.');
@@ -84,9 +85,10 @@ function PaymentSuccessInner() {
         const gId = data.metadata?.groupId || null;
         setGroupId(gId);
 
-        // 2) Trova la mia ultima request (utente loggato)
+        // 2) Utente corrente + sua ultima request
         const { data: auth } = await supabase.auth.getSession();
-        const userId = auth.session?.user?.id;
+        const userId = auth.session?.user?.id || null;
+        setMeId(userId);
         if (!userId) throw new Error('Non sei loggato.');
 
         const { data: reqs, error: reqErr } = await supabase
@@ -100,22 +102,21 @@ function PaymentSuccessInner() {
         const myRequestId = reqs?.[0]?.id as string | undefined;
         if (!myRequestId) throw new Error('Nessuna richiesta trovata per questo utente.');
 
-        // 3) Marca la mia quota come pagata
+        // 3) Marca la mia quota come pagata nel gruppo
         if (gId && myRequestId) {
           const { error: updErr } = await supabase
             .from('group_members')
             .update({
               price_share_cents: Math.round(data.amount_total ?? 0),
-              // se non hai la colonna "status", commenta la riga sotto
+              // se non esiste la colonna "status", commenta la riga sotto
               status: 'paid',
             })
             .eq('group_id', gId)
             .eq('request_id', myRequestId);
-
           if (updErr) throw updErr;
         }
 
-        // 4) Carica elenco membri (group_members -> requests -> users.email)
+        // 4) Carica i membri del gruppo (con email tramite join)
         if (gId) {
           const { data: mem, error } = await supabase
             .from('group_members')
@@ -176,11 +177,7 @@ function PaymentSuccessInner() {
           <p>
             Importo pagato: <b>{amount?.toFixed(2)} {currency}</b>
           </p>
-          {groupId && (
-            <p>
-              Codice gruppo: <b>{shortGroupCode(groupId)}</b>
-            </p>
-          )}
+          {groupId && <p>Codice gruppo: <b>{shortGroupCode(groupId)}</b></p>}
         </div>
 
         {members.length > 0 && (
@@ -192,7 +189,7 @@ function PaymentSuccessInner() {
                   key={m.request_id}
                   className="flex justify-between items-center bg-zinc-950 rounded px-3 py-1"
                 >
-                  <span>{labelFor(m)}</span>
+                  <span>{labelFor(m, meId)}</span>
                   <span>
                     {m.price_share_cents != null
                       ? `€${(m.price_share_cents / 100).toFixed(2)}`
