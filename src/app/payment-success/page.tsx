@@ -12,7 +12,7 @@ type GroupMember = {
   distance_km: number | null;
   price_share_cents: number | null;
   user_email: string | null;
-  user_id?: string | null; // 👈 per generare il codice fallback
+  user_id?: string | null; // per codice fallback
 };
 
 // --------- Helpers ---------
@@ -21,7 +21,6 @@ function shortGroupCode(id?: string | null) {
   return id.slice(0, 8).toUpperCase();
 }
 function labelFor(m: GroupMember) {
-  // Mostra email se disponibile, altrimenti un codice PAX-XXXXXXXX
   const base = (m.user_id || m.request_id || '').slice(0, 8).toUpperCase();
   return m.user_email || `PAX-${base || 'UNKNOWN'}`;
 }
@@ -57,12 +56,22 @@ function PaymentSuccessInner() {
           return;
         }
 
-        // 1) Verifica sessione Stripe (la nostra API server-side)
-        const r = await fetch(`/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`, {
-          cache: 'no-store',
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'Errore verifica pagamento');
+        // 1) Verifica sessione Stripe (API server-side)
+        const r = await fetch(
+          `/api/checkout/session?session_id=${encodeURIComponent(sessionId)}`,
+          { cache: 'no-store' }
+        );
+
+        // Parse robusto: evita crash se arriva HTML/errore
+        let data: any = null;
+        const ct = r.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          data = await r.json();
+        } else {
+          const text = await r.text();
+          throw new Error(`/api/checkout/session non JSON (${r.status}): ${text.slice(0, 120)}`);
+        }
+        if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
 
         if (data.payment_status !== 'paid') {
           setMsg('Pagamento non confermato.');
@@ -91,7 +100,7 @@ function PaymentSuccessInner() {
         const myRequestId = reqs?.[0]?.id as string | undefined;
         if (!myRequestId) throw new Error('Nessuna richiesta trovata per questo utente.');
 
-        // 3) Aggiorna la mia riga in group_members (marco pagato)
+        // 3) Marca la mia quota come pagata
         if (gId && myRequestId) {
           const { error: updErr } = await supabase
             .from('group_members')
@@ -106,12 +115,11 @@ function PaymentSuccessInner() {
           if (updErr) throw updErr;
         }
 
-        // 4) Carica elenco membri: group_members -> requests -> users (email)
+        // 4) Carica elenco membri (group_members -> requests -> users.email)
         if (gId) {
           const { data: mem, error } = await supabase
             .from('group_members')
-            .select(
-              `
+            .select(`
               request_id,
               distance_km,
               price_share_cents,
@@ -122,8 +130,7 @@ function PaymentSuccessInner() {
                   email
                 )
               )
-            `
-            )
+            `)
             .eq('group_id', gId);
 
           if (error) throw new Error(error.message);
@@ -160,14 +167,20 @@ function PaymentSuccessInner() {
         <h1 className="text-2xl font-bold text-green-400">Pagamento riuscito</h1>
 
         {msg && (
-          <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4">{msg}</div>
+          <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4">
+            {msg}
+          </div>
         )}
 
         <div className="bg-zinc-900/70 ring-1 ring-zinc-800 rounded-xl p-4 space-y-1">
           <p>
             Importo pagato: <b>{amount?.toFixed(2)} {currency}</b>
           </p>
-          {groupId && <p>Codice gruppo: <b>{shortGroupCode(groupId)}</b></p>}
+          {groupId && (
+            <p>
+              Codice gruppo: <b>{shortGroupCode(groupId)}</b>
+            </p>
+          )}
         </div>
 
         {members.length > 0 && (
@@ -181,7 +194,9 @@ function PaymentSuccessInner() {
                 >
                   <span>{labelFor(m)}</span>
                   <span>
-                    {m.price_share_cents != null ? `€${(m.price_share_cents / 100).toFixed(2)}` : '—'}
+                    {m.price_share_cents != null
+                      ? `€${(m.price_share_cents / 100).toFixed(2)}`
+                      : '—'}
                   </span>
                 </li>
               ))}
